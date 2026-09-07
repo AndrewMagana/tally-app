@@ -244,7 +244,7 @@
   </nav>
 
   <!-- FOOD SHEET (add to log OR add ingredient to recipe) -->
-  <div class="overlay" id="foodSheet">
+  <div class="overlay" id="foodSheet" style="z-index:60;">
     <div class="sheet-body" id="foodSheetBody"></div>
   </div>
 
@@ -380,7 +380,7 @@ function logRowHTML(e){
   return `<div class="log-row">
     <div>
       <div class="name">${escapeHtml(e.name)}</div>
-      <div class="desc">${escapeHtml(e.desc||'')}</div>
+      <div class="desc">${e.source?`${escapeHtml(e.source)} · `:''}${escapeHtml(e.desc||'')}</div>
     </div>
     <div style="display:flex;align-items:center;gap:8px;">
       <div class="cal">${Math.round(e.calories)} kcal</div>
@@ -427,6 +427,7 @@ async function addLogEntry(item, qty){
   const entry = {
     id: 'e'+Date.now()+Math.random().toString(36).slice(2,6),
     name: item.name,
+    source: item.brand || '',
     desc: `${qty} × ${item.unitLabel}`,
     calories: item.perUnit.cal*qty,
     protein: item.perUnit.protein*qty,
@@ -498,22 +499,36 @@ function normalizeOFF(p){
     unitLabel, perUnit
   };
 }
+async function offFetchJSON(url){
+  let res;
+  try{
+    res = await fetch(url);
+  }catch(networkErr){
+    throw new Error('Could not reach the food database — check your internet connection.');
+  }
+  if(!res.ok){
+    if(res.status===429) throw new Error('Open Food Facts is rate-limiting this app right now (max ~10 searches/minute). Wait a moment and try again.');
+    throw new Error(`Food database returned an error (HTTP ${res.status}). Try again in a moment.`);
+  }
+  try{
+    return await res.json();
+  }catch(parseErr){
+    throw new Error('Got an unexpected (non-JSON) response from the food database — it may be temporarily blocking requests from this site. Try again shortly.');
+  }
+}
 async function offLookupBarcode(code){
-  const res = await fetch(`https://world.openfoodfacts.org/api/v2/product/${encodeURIComponent(code)}.json`);
-  const data = await res.json();
+  const data = await offFetchJSON(`https://world.openfoodfacts.org/api/v2/product/${encodeURIComponent(code)}.json`);
   if(data && data.status===1 && data.product) return normalizeOFF(data.product);
   return null;
 }
 async function offSearch(query){
-  const res = await fetch(`https://world.openfoodfacts.org/cgi/search.pl?search_terms=${encodeURIComponent(query)}&search_simple=1&action=process&json=1&page_size=30`);
-  const data = await res.json();
+  const data = await offFetchJSON(`https://world.openfoodfacts.org/cgi/search.pl?search_terms=${encodeURIComponent(query)}&search_simple=1&action=process&json=1&page_size=30`);
   return (data.products||[]).filter(p=>p.product_name).map(normalizeOFF);
 }
 async function offBrandSearch(brand, keyword){
   let url = `https://world.openfoodfacts.org/cgi/search.pl?action=process&tagtype_0=brands&tag_contains_0=contains&tag_0=${encodeURIComponent(brand)}&json=1&page_size=40`;
   if(keyword) url += `&search_terms=${encodeURIComponent(keyword)}`;
-  const res = await fetch(url);
-  const data = await res.json();
+  const data = await offFetchJSON(url);
   return (data.products||[]).filter(p=>p.product_name).map(normalizeOFF);
 }
 
@@ -544,10 +559,10 @@ function groupSearchResults(items){
 }
 
 /* ============================= FOOD SHEET (shared by log + recipe ingredients) ============================= */
-let sheet = { target:'log', view:'menu', pendingItem:null, results:[], sizeGroup:null, query:'', brand:'', brandKeyword:'', brandSearched:false, searching:false, error:'', cameraOn:false, scanMsg:'' };
+let sheet = { target:'log', view:'menu', pendingItem:null, results:[], sizeGroup:null, query:'', brand:'', brandKeyword:'', brandSearched:false, prefillName:'', searching:false, error:'', cameraOn:false, scanMsg:'' };
 
 function openFoodSheet(target){
-  sheet = { target, view:'menu', pendingItem:null, results:[], sizeGroup:null, query:'', brand:'', brandKeyword:'', brandSearched:false, searching:false, error:'', cameraOn:false, scanMsg:'' };
+  sheet = { target, view:'menu', pendingItem:null, results:[], sizeGroup:null, query:'', brand:'', brandKeyword:'', brandSearched:false, prefillName:'', searching:false, error:'', cameraOn:false, scanMsg:'' };
   document.getElementById('foodSheet').classList.add('open');
   renderFoodSheet();
 }
@@ -559,6 +574,14 @@ function goSheet(view){
   sheet.view=view; sheet.error='';
   if(view==='scan'){ sheet.cameraOn=false; sheet.scanMsg=''; stopScanner(); }
   renderFoodSheet();
+}
+function goCustomFormPrefilled(){
+  if(sheet.view==='brandSearch'){
+    sheet.prefillName = [sheet.brand, sheet.brandKeyword].filter(Boolean).join(' ');
+  } else {
+    sheet.prefillName = sheet.query || '';
+  }
+  goSheet('customForm');
 }
 
 function renderFoodSheet(){
@@ -579,7 +602,10 @@ function renderFoodSheet(){
       </div>
       ${sheet.searching ? `<div class="msg">Searching…</div>` : ''}
       ${(!sheet.searching && sheet.results.length) ? sheet.results.map((g,i)=>resultRowHTML(g,i)).join('') : ''}
-      ${(!sheet.searching && sheet.query && !sheet.results.length) ? `<div class="msg${sheet.error?' err':''}">${escapeHtml(sheet.error||'No results found.')}</div>` : ''}
+      ${(!sheet.searching && sheet.query && !sheet.results.length) ? `
+        <div class="msg${sheet.error?' err':''}">${escapeHtml(sheet.error||'No results found.')}</div>
+        <button class="btn accent block" onclick="goCustomFormPrefilled()">Add "${escapeHtml(sheet.query)}" as a restaurant/cafe item</button>
+      ` : ''}
 
       <div class="section-label" style="margin-top:18px;">Other ways to add</div>
       <button class="menu-opt" onclick="goSheet('brandSearch')"><span class="ic">®</span><span>Search by brand<small>e.g. Quaker, Chobani, Kirkland</small></span></button>
@@ -618,7 +644,10 @@ function renderFoodSheet(){
       <button class="btn accent block" style="margin-top:12px;" onclick="submitBrandSearch()">Search</button>
       ${sheet.searching ? `<div class="msg">Searching…</div>` : ''}
       ${(!sheet.searching && sheet.results.length) ? sheet.results.map((g,i)=>resultRowHTML(g,i)).join('') : ''}
-      ${(!sheet.searching && sheet.brandSearched && !sheet.results.length) ? `<div class="msg${sheet.error?' err':''}">${escapeHtml(sheet.error||'No results found for that brand.')}</div>` : ''}
+      ${(!sheet.searching && sheet.brandSearched && !sheet.results.length) ? `
+        <div class="msg${sheet.error?' err':''}">${escapeHtml(sheet.error||'No results found for that brand.')}</div>
+        <button class="btn accent block" onclick="goCustomFormPrefilled()">Add "${escapeHtml([sheet.brand, sheet.brandKeyword].filter(Boolean).join(' '))}" as a restaurant/cafe item</button>
+      ` : ''}
     `;
   }
 
@@ -651,10 +680,12 @@ function renderFoodSheet(){
     html = `
       <div class="sheet-head"><div class="sheet-title">Enter manually</div>
         <button class="sheet-close" onclick="closeFoodSheet()">×</button></div>
-      <label class="field">Food name</label>
-      <input type="text" id="cf-name" placeholder="e.g. Homemade granola bar">
+      <label class="field" style="margin-top:0;">Food name</label>
+      <input type="text" id="cf-name" placeholder="e.g. Matcha Cloud Cream" value="${escapeHtml(sheet.prefillName||'')}">
+      <label class="field">Restaurant / cafe / place (optional)</label>
+      <input type="text" id="cf-source" placeholder="e.g. Alfred's Coffee — Melrose">
       <label class="field">Serving description</label>
-      <input type="text" id="cf-serving" placeholder="e.g. 1 bar (40 g)">
+      <input type="text" id="cf-serving" placeholder="e.g. 1 medium (16 oz)">
       <div class="field-row">
         <div><label class="field">Calories</label><input type="number" id="cf-cal" inputmode="decimal"></div>
         <div><label class="field">Protein (g)</label><input type="number" id="cf-protein" inputmode="decimal"></div>
@@ -754,7 +785,7 @@ async function submitMenuSearch(){
     sheet.results = groupSearchResults(await offSearch(q));
     if(!sheet.results.length) sheet.error='No results found — try a different search or add it manually.';
   }catch(e){
-    sheet.error='Search failed — check your connection.';
+    sheet.error = e.message || 'Search failed — check your connection.';
   }
   sheet.searching=false;
   renderFoodSheet();
@@ -772,7 +803,7 @@ async function submitBrandSearch(){
     sheet.results = groupSearchResults(await offBrandSearch(brand, keyword));
     if(!sheet.results.length) sheet.error='No results found for that brand — try a different spelling or narrow term.';
   }catch(e){
-    sheet.error='Search failed — check your connection.';
+    sheet.error = e.message || 'Search failed — check your connection.';
   }
   sheet.searching = false;
   renderFoodSheet();
@@ -785,17 +816,18 @@ async function submitBarcode(){
     const item = await offLookupBarcode(code);
     if(item){ sheet.pendingItem=item; sheet.qty=1; goSheet('detail'); }
     else { sheet.error='No product found for that barcode. Try search or enter manually.'; renderFoodSheet(); }
-  }catch(e){ sheet.error='Lookup failed — check your connection.'; renderFoodSheet(); }
+  }catch(e){ sheet.error = e.message || 'Lookup failed — check your connection.'; renderFoodSheet(); }
 }
 function submitCustomForm(){
   const name = document.getElementById('cf-name').value.trim();
+  const source = document.getElementById('cf-source').value.trim();
   const serving = document.getElementById('cf-serving').value.trim() || '1 serving';
   const cal = parseFloat(document.getElementById('cf-cal').value)||0;
   const protein = parseFloat(document.getElementById('cf-protein').value)||0;
   const carbs = parseFloat(document.getElementById('cf-carbs').value)||0;
   const fat = parseFloat(document.getElementById('cf-fat').value)||0;
   if(!name){ sheet.error='Give the food a name.'; renderFoodSheet(); return; }
-  sheet.pendingItem = { name, brand:'', unitLabel:serving, perUnit:{cal,protein,carbs,fat} };
+  sheet.pendingItem = { name, brand:source, unitLabel:serving, perUnit:{cal,protein,carbs,fat} };
   sheet.qty = 1;
   goSheet('detail');
 }
@@ -941,7 +973,7 @@ async function onBarcodeDetected(result){
       if(bi) bi.value = code;
     }
   }catch(e){
-    sheet.view='manualBarcode'; sheet.error='Lookup failed — check your connection.'; renderFoodSheet();
+    sheet.view='manualBarcode'; sheet.error = e.message || 'Lookup failed — check your connection.'; renderFoodSheet();
   }
 }
 
